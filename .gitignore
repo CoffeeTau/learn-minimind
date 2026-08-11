@@ -1,0 +1,29 @@
+# Python
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# IDE
+.idea/
+.vscode/
+
+# 数据集
+dataset/*.jsonl
+
+# Python 虚拟环境
+.venv/
+
+# 模型权重
+*.pth
+*.pt
+*.bin
+*.ckpt
+*.safetensors
+
+# 训练输出
+
+# 文档构建
+website/
+docs-minimind/
