@@ -30,7 +30,9 @@ def train_epoch(epoch,           # 当前是第几个 epoch，从 0 开始
     start_time = time.time()
     last_step = start_step
     for step, (input_ids, labels) in enumerate(loader, start=start_step + 1):
+        # input_ids: [B, T]
         input_ids = input_ids.to(args.device)   # 把数据搬到GPU
+        # labels: [B, T]
         labels = labels.to(args.device)
         last_step = step   # 记录当前的step
 
@@ -42,9 +44,11 @@ def train_epoch(epoch,           # 当前是第几个 epoch，从 0 开始
         # 前向传播和loss计算
         # - with autocast_ctx表示混合精度上下文，cuda会用bf16/fp16加速部分计算
         with autocast_ctx:
-            # res是模型前向传播的返回结果对象，实际是调用MiniMindForCausalLM.forward()
+            '''
+            
+            '''
             res = model(input_ids, labels=labels)
-            loss = res.loss + res.aux_loss            # 主语言模型 loss + MoE辅助loss
+            loss = res.loss + res.aux_loss            # 主语言模型 loss + MoE辅助loss(专家负载均衡损失)
             loss = loss / args.accumulation_steps     # 除以梯度累计步数，因为这里是先计算小batch的loss，而代码的计算方法是args.accumulation_steps个小batch的梯度累计起来再更新参数
 
         # 反向传播

@@ -193,7 +193,9 @@ class MiniMindBlock(nn.Module):
         hidden_states = hidden_states + self.mlp(self.post_attention_layernorm(hidden_states))
         return hidden_states, present_key_value
 
+
 class MiniMindModel(nn.Module):
+    ''' Transformer主干 '''
     def __init__(self, config: MiniMindConfig):
         super().__init__()
         self.config = config
@@ -208,9 +210,15 @@ class MiniMindModel(nn.Module):
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, **kwargs):
         batch_size, seq_length = input_ids.shape
+        
+        # past_key_values 是 Attention 的 KV Cache（Key/Value 缓存），主要用于加速自回归生成
+        # past_key_values是一个列表，长度等于transformer的层数，每一层的past_key_value是一个元组，包含该层的key和value张量
+        # 它保存每一层 Attention 已经为历史 token 计算过的 Key 和 Value，使模型生成下一个 token 时不必重新计算整个历史序列
         if hasattr(past_key_values, 'layers'): past_key_values = None
         past_key_values = past_key_values or [None] * len(self.layers)
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
+        
+        # input_ids: [B, T] -> hidden_states: [B, T, H]
         hidden_states = self.dropout(self.embed_tokens(input_ids))
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
@@ -232,6 +240,7 @@ class MiniMindModel(nn.Module):
         return hidden_states, presents, aux_loss
 
 class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
+    ''' MiniMindForCausalLM 在主干Minimind外面增加了语言模型输出头、语言模型损失计算，以及与 Transformers 生态的适配 '''
     config_class = MiniMindConfig
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     def __init__(self, config: MiniMindConfig = None):
@@ -243,13 +252,21 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         self.post_init()
 
     def forward(self, input_ids, attention_mask=None, past_key_values=None, use_cache=False, logits_to_keep=0, labels=None, **kwargs):
+        # input_ids: [B, T] -> hidden_states: [B, T, H]
         hidden_states, past_key_values, aux_loss = self.model(input_ids, attention_mask, past_key_values, use_cache, **kwargs)
+        # 第一次执行: slice_indices = slice(0, None, None)
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
+        # logits: [B, T, V] (32, 340, 6400)
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         loss = None
         if labels is not None:
+            # x: [B, T-1, V] - (32, 339, 6400) - 表示模型对词表中所有token的预测分数
+            # y: [B, T-1] - (32, 339) - 表示正确的下一个token在词表中的索引
             x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
+            # loss是标量 - 8.8993
             loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
+            
+        # 把本次前向传播的各种结果(比如loss, logits等)，封装成一个结构化对象返回
         return MoeCausalLMOutputWithPast(loss=loss, aux_loss=aux_loss, logits=logits, past_key_values=past_key_values, hidden_states=hidden_states)
     
     # https://github.com/jingyaogong/minimind/discussions/611
