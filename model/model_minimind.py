@@ -10,6 +10,7 @@ from transformers.modeling_outputs import MoeCausalLMOutputWithPast
 class MiniMindConfig(PretrainedConfig):
     model_type = "minimind"
     def __init__(self, hidden_size=768, num_hidden_layers=8, use_moe=False, **kwargs):
+        # 调用当前类的父类构造函数，并把 kwargs 中的配置参数传给父类
         super().__init__(**kwargs)
         self.hidden_size = hidden_size
         self.num_hidden_layers = num_hidden_layers
@@ -89,6 +90,7 @@ def repeat_kv(x: torch.Tensor, n_rep: int) -> torch.Tensor:
     return (x[:, :, :, None, :].expand(bs, slen, num_key_value_heads, n_rep, head_dim).reshape(bs, slen, num_key_value_heads * n_rep, head_dim))
 
 class Attention(nn.Module):
+    ''' 让当前每个 token 根据上下文中相关 token 的信息，重新生成自己的表示 '''
     def __init__(self, config: MiniMindConfig):
         super().__init__()
         self.num_key_value_heads = config.num_attention_heads if config.num_key_value_heads is None else config.num_key_value_heads
@@ -97,8 +99,11 @@ class Attention(nn.Module):
         self.n_rep = self.n_local_heads // self.n_local_kv_heads
         self.head_dim = config.head_dim
         self.is_causal = True
+        # (768, 8 * 96, bias=False)
         self.q_proj = nn.Linear(config.hidden_size, config.num_attention_heads * self.head_dim, bias=False)
+        # (768, 4 * 96, bias=False)
         self.k_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
+        # (768, 4 * 96, bias=False)
         self.v_proj = nn.Linear(config.hidden_size, self.num_key_value_heads * self.head_dim, bias=False)
         self.o_proj = nn.Linear(config.num_attention_heads * self.head_dim, config.hidden_size, bias=False)
         self.q_norm = RMSNorm(self.head_dim, eps=config.rms_norm_eps)
@@ -109,7 +114,11 @@ class Attention(nn.Module):
         self.flash = hasattr(torch.nn.functional, 'scaled_dot_product_attention') and config.flash_attn
 
     def forward(self, x, position_embeddings, past_key_value=None, use_cache=False, attention_mask=None):
-        bsz, seq_len, _ = x.shape
+        bsz, seq_len, _ = x.shape # x: [B, T, H]
+        # 根据输入的x分别投影出Q, K, V
+        # xq: [B, T, H] - (32, 340, 768)
+        # xk: [B, T, H / 2] - (32, 340, 384)
+        # xv: [B, T, H / 2] - (32, 340, 384)
         xq, xk, xv = self.q_proj(x), self.k_proj(x), self.v_proj(x)
         xq = xq.view(bsz, seq_len, self.n_local_heads, self.head_dim)
         xk = xk.view(bsz, seq_len, self.n_local_kv_heads, self.head_dim)
@@ -176,6 +185,7 @@ class MOEFeedForward(nn.Module):
         return y.view(batch_size, seq_len, hidden_dim)
 
 class MiniMindBlock(nn.Module):
+    ''' Transformer Layer'''
     def __init__(self, layer_id: int, config: MiniMindConfig):
         super().__init__()
         self.self_attn = Attention(config)
@@ -195,11 +205,12 @@ class MiniMindBlock(nn.Module):
 
 
 class MiniMindModel(nn.Module):
-    ''' Transformer主干 '''
+    ''' Transformer主干, 包含embedding层、多个Transformer Block、RMSNorm层 '''
     def __init__(self, config: MiniMindConfig):
         super().__init__()
         self.config = config
         self.vocab_size, self.num_hidden_layers = config.vocab_size, config.num_hidden_layers
+        # 用来embedding
         self.embed_tokens = nn.Embedding(config.vocab_size, config.hidden_size)
         self.dropout = nn.Dropout(config.dropout)
         self.layers = nn.ModuleList([MiniMindBlock(l, config) for l in range(self.num_hidden_layers)])
@@ -219,6 +230,7 @@ class MiniMindModel(nn.Module):
         start_pos = past_key_values[0][0].shape[1] if past_key_values[0] is not None else 0
         
         # input_ids: [B, T] -> hidden_states: [B, T, H]
+        # 利用emb表self.embed_tokens将输入的token id映射为对应的embedding向量，得到hidden_states
         hidden_states = self.dropout(self.embed_tokens(input_ids))
         # Recompute RoPE buffers lost during meta-device init (transformers>=5.x)
         if self.freqs_cos[0, 0] == 0:
@@ -242,12 +254,17 @@ class MiniMindModel(nn.Module):
 class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
     ''' MiniMindForCausalLM 在主干Minimind外面增加了语言模型输出头、语言模型损失计算，以及与 Transformers 生态的适配 '''
     config_class = MiniMindConfig
+    
+    # 这两个权重矩阵的shape都是[6400, 768]，分别是语言模型输出头的权重矩阵和嵌入层的权重矩阵
+    # 这两个权重矩阵共享参数，即lm_head.weight和model.embed_tokens.weight指向同一个张量
+    # “shape 一样”只是能够绑定的结构条件，真正合理绑定还因为它们在语言模型中具有互相对应的语义
     _tied_weights_keys = {"lm_head.weight": "model.embed_tokens.weight"}
     def __init__(self, config: MiniMindConfig = None):
         self.config = config or MiniMindConfig()
         super().__init__(self.config)
         self.model = MiniMindModel(self.config)
         self.lm_head = nn.Linear(self.config.hidden_size, self.config.vocab_size, bias=False)
+        # 这里执行了权重共享，即lm_head.weight和model.embed_tokens.weight指向同一个nn.Parameter张量
         if self.config.tie_word_embeddings: self.model.embed_tokens.weight = self.lm_head.weight
         self.post_init()
 
@@ -257,6 +274,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
         # 第一次执行: slice_indices = slice(0, None, None)
         slice_indices = slice(-logits_to_keep, None) if isinstance(logits_to_keep, int) else logits_to_keep
         # logits: [B, T, V] (32, 340, 6400)
+        # logits表示下一个token的未归一化预测分数，维度为[batch_size, sequence_length, vocab_size]，其中vocab_size是词表大小
         logits = self.lm_head(hidden_states[:, slice_indices, :])
         loss = None
         if labels is not None:
@@ -264,6 +282,7 @@ class MiniMindForCausalLM(PreTrainedModel, GenerationMixin):
             # y: [B, T-1] - (32, 339) - 表示正确的下一个token在词表中的索引
             x, y = logits[..., :-1, :].contiguous(), labels[..., 1:].contiguous()
             # loss是标量 - 8.8993
+            # 虽然logits是未经softmax的原始分数，但是F.cross_entropy(...)内部已经完成稳定的log_softmax + negative log-likelihood
             loss = F.cross_entropy(x.view(-1, x.size(-1)), y.view(-1), ignore_index=-100)
             
         # 把本次前向传播的各种结果(比如loss, logits等)，封装成一个结构化对象返回

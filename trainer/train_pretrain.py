@@ -44,12 +44,13 @@ def train_epoch(epoch,           # 当前是第几个 epoch，从 0 开始
         # 前向传播和loss计算
         # - with autocast_ctx表示混合精度上下文，cuda会用bf16/fp16加速部分计算
         with autocast_ctx:
-            '''
-            
-            '''
+            # 这里会自动调用model的forward函数，返回一个包含loss和aux_loss的对象
             res = model(input_ids, labels=labels)
             loss = res.loss + res.aux_loss            # 主语言模型 loss + MoE辅助loss(专家负载均衡损失)
-            loss = loss / args.accumulation_steps     # 除以梯度累计步数，因为这里是先计算小batch的loss，而代码的计算方法是args.accumulation_steps个小batch的梯度累计起来再更新参数
+            '''
+            梯度累积会把一个大batch拆成多个小batch，计算多个小batch的loss和梯度
+            '''
+            loss = loss / args.accumulation_steps 
 
         # 反向传播
         # - backward就是计算loss对每个参数的偏导数，例如∂loss / ∂W，计算完的梯度存在每个模型参数的.grad属性里
@@ -60,7 +61,7 @@ def train_epoch(epoch,           # 当前是第几个 epoch，从 0 开始
             scaler.unscale_(optimizer)  # 先把梯度缩回正常尺度
             torch.nn.utils.clip_grad_norm_(model.parameters(), args.grad_clip)  # 梯度裁剪，防止发生梯度爆炸
 
-            # 更新参数
+            # 更新参数, 也就是optimizer.step()，但是因为启用了GradScaler，所以要用scaler.step(optimizer)
             scaler.step(optimizer)  # 根据梯度更新模型参数，可以理解为启用GradScanler后的optimizer.step()
             scaler.update()         # 更新下一次FP16训练使用的动态缩放因子
 
