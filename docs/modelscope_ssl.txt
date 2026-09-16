@@ -1,0 +1,16 @@
+cat >/tmp/sitecustomize.py <<'EOF'
+import requests
+
+_old_request = requests.sessions.Session.request
+
+def _request(self, method, url, **kwargs):
+    kwargs["verify"] = False
+    return _old_request(self, method, url, **kwargs)
+
+requests.sessions.Session.request = _request
+EOF
+
+PYTHONPATH=/tmp:$PYTHONPATH modelscope download \
+  --dataset gongjy/minimind_dataset \
+  README.md \
+  --local_dir ./dir

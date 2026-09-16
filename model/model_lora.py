@@ -15,19 +15,27 @@ class LoRA(nn.Module):
         self.B.weight.data.zero_()
 
     def forward(self, x):
-        return self.B(self.A(x))
+        return self.B(self.A(x))  # y = Wx + (alpha / r) BAx
 
 
 def apply_lora(model, rank=16):
+    '''
+    遍历模型中的线性层，为符合条件的层动态添加一个 LoRA 分支，并把原来的前向传播改成“原线性层输出 + LoRA 增量输出”。
+    这个函数没有return，采用的是原地修改：apply_lora(model)
+    '''
     for name, module in model.named_modules():
+        # 筛选条件：线性层 + 输入输出维度相同
         if isinstance(module, nn.Linear) and module.in_features == module.out_features:
+            # 创建LoRA分支，并移到GPU设备
             lora = LoRA(module.in_features, module.out_features, rank=rank).to(model.device)
-            setattr(module, "lora", lora)
-            original_forward = module.forward
+            # setattr是Python的动态属性设置函数
+            # - 将lora设置成属性，等价于： module.lora = lora
+            setattr(module, "lora", lora) 
+            original_forward = module.forward  # 保存原来的forward
 
             # 显式绑定
             def forward_with_lora(x, layer1=original_forward, layer2=lora):
-                return layer1(x) + layer2(x)
+                return layer1(x) + layer2(x)  # 新的前向传播函数
 
             module.forward = forward_with_lora
 
