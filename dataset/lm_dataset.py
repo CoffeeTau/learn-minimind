@@ -7,6 +7,9 @@ from datasets import load_dataset
 os.environ["TOKENIZERS_PARALLELISM"] = "false"
 
 def pre_processing_chat(conversations, add_system_ratio=0.2):
+    '''
+    在 SFT 样本被转换成聊天模板之前，视情况给普通对话补一条 system 消息。**它不负责分词，也不生成 labels
+    '''
     # tool use 数据完整保留不做处理
     if any(conv.get('tools') for conv in conversations): return conversations
 
@@ -157,18 +160,29 @@ class SFTDataset(Dataset):
         return labels
 
     def __getitem__(self, index):
+        '''
+        数据流案例见obsidian: minimind/SFT/__getitem__的数据流
+        
+        SFT 和预训练都在做 next-token prediction，训练循环基本相同；主要区别之一是 SFT 通过 labels=-100，只让 assistant 回答部分参与交叉熵损失。
+        再精确一点：两者不只是 labels 不同，训练数据的语义、模型起点和默认超参数也不同。
+        '''
+        
         sample = self.samples[index]
-        conversations = pre_processing_chat(sample['conversations'])
-        prompt = self.create_chat_prompt(conversations)
-        prompt = post_processing_chat(prompt)
+        conversations = pre_processing_chat(sample['conversations']) # 加入system prompt
+        prompt = self.create_chat_prompt(conversations) # 把结构化的多轮消息转换成符合 MiniMind 聊天格式的字符串
+        prompt = post_processing_chat(prompt)  # 处理空的思考标签
+        # prompt中的特殊标记，比如<|im_start|> <|im_end|>也要经过tokenizer
+        # 这些标记通常已经注册为特殊token，所以往往会整体映射成一个id，而不是被拆成普通字符
+        # 这里<|im_start|> <|im_end|>分别映射为id1和2
         input_ids = self.tokenizer(prompt).input_ids[:self.max_length]
+        # 进行padding补0，len() = 768
         input_ids += [self.tokenizer.pad_token_id] * (self.max_length - len(input_ids))
+        
+        # generate_labels()首先把所有位置变成-100，然后只把assistant的回答区域替换成真实的token id
+        # input_ids：[真实对话token..., EOS, PAD,  PAD,  PAD]
+        # labels：   [-100..., 回答token..., EOS, -100, -100, -100]
         labels = self.generate_labels(input_ids)
-        # # === 调试打印 ===
-        # print(f"\n--- Sample {index} ---")
-        # for i, (x, y) in enumerate(zip(input_ids[:-1], labels[1:])):
-        #     print(f"{i:3d}: X={self.tokenizer.decode([x])!r:16s} ---> Y={self.tokenizer.decode([input_ids[i+1]])!r:16s} label={y}")
-        # # ================
+        
         return torch.tensor(input_ids, dtype=torch.long), torch.tensor(labels, dtype=torch.long)
 
 

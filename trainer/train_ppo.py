@@ -379,6 +379,7 @@ if __name__ == "__main__":
     # ========== 5. 初始化模型和数据 ==========
     base_weight = args.from_weight
     # Actor模型
+    # - actor model负责生成回答，并学习提高 高优势 动作的概率(从)
     actor_model, tokenizer = init_model(lm_config, base_weight, device=args.device)
     ref_model, _ = init_model(lm_config, base_weight, device=args.device)
     ref_model = ref_model.eval().requires_grad_(False)
